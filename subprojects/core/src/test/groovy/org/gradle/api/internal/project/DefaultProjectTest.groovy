@@ -77,6 +77,7 @@ import org.gradle.configuration.project.ProjectEvaluator
 import org.gradle.groovy.scripts.EmptyScript
 import org.gradle.groovy.scripts.ScriptSource
 import org.gradle.initialization.ClassLoaderScopeRegistryListener
+import org.gradle.internal.Actions
 import org.gradle.internal.Factory
 import org.gradle.internal.instantiation.InstantiatorFactory
 import org.gradle.internal.logging.LoggingManagerInternal
@@ -89,6 +90,7 @@ import org.gradle.internal.resource.StringTextResource
 import org.gradle.internal.resource.TextFileResourceLoader
 import org.gradle.internal.service.ServiceRegistry
 import org.gradle.internal.service.scopes.ServiceRegistryFactory
+import org.gradle.invocation.GradleLifecycleActionExecutor
 import org.gradle.model.internal.manage.instance.ManagedProxyFactory
 import org.gradle.model.internal.manage.schema.ModelSchemaStore
 import org.gradle.model.internal.registry.ModelRegistry
@@ -98,6 +100,7 @@ import org.gradle.util.Path
 import org.gradle.util.TestClosure
 import org.gradle.util.TestUtil
 import org.junit.Rule
+import spock.lang.Ignore
 import spock.lang.Specification
 
 import java.lang.reflect.Type
@@ -146,9 +149,9 @@ class DefaultProjectTest extends Specification {
     ProcessOperations processOperationsMock = Stub(ProcessOperations)
     LoggingManagerInternal loggingManagerMock = Stub(LoggingManagerInternal)
     Instantiator instantiatorMock = Stub(Instantiator) {
-        newInstance(LifecycleAwareProject, _) >> { args ->
+        newInstance(LifecycleAwareProject, _, _, _) >> { args ->
             def params = args[1]
-            new LifecycleAwareProject(params[0], params[1])
+            new LifecycleAwareProject(params[0], params[1], params[2])
         }
     }
     SoftwareComponentContainer softwareComponentsMock = Stub(SoftwareComponentContainer)
@@ -167,7 +170,8 @@ class DefaultProjectTest extends Specification {
     CrossProjectConfigurator crossProjectConfigurator = new BuildOperationCrossProjectConfigurator(buildOperationRunner)
     ClassLoaderScope baseClassLoaderScope = new RootClassLoaderScope("root", getClass().classLoader, getClass().classLoader, new DummyClassLoaderCache(), Stub(ClassLoaderScopeRegistryListener))
     ClassLoaderScope rootProjectClassLoaderScope = baseClassLoaderScope.createChild("root-project", null)
-    ObjectFactory objectFactory = new DefaultObjectFactory(instantiatorMock, Stub(NamedObjectInstantiator), Stub(DirectoryFileTreeFactory),  TestFiles.patternSetFactory,  new DefaultPropertyFactory(Stub(PropertyHost)), Stub(FilePropertyFactory), TestFiles.taskDependencyFactory(), Stub(FileCollectionFactory), Stub(DomainObjectCollectionFactory))
+    ObjectFactory objectFactory = new DefaultObjectFactory(instantiatorMock, Stub(NamedObjectInstantiator), Stub(DirectoryFileTreeFactory), TestFiles.patternSetFactory, new DefaultPropertyFactory(Stub(PropertyHost)), Stub(FilePropertyFactory), TestFiles.taskDependencyFactory(), Stub(FileCollectionFactory), Stub(DomainObjectCollectionFactory))
+    GradleLifecycleActionExecutor gradleLifecycleActionExecutor = Stub(GradleLifecycleActionExecutor)
 
     def setup() {
         rootDir = new File("/path/root").absoluteFile
@@ -227,7 +231,8 @@ class DefaultProjectTest extends Specification {
         serviceRegistryMock.get((Type) CrossProjectConfigurator) >> crossProjectConfigurator
         serviceRegistryMock.get(DependencyResolutionManagementInternal) >> dependencyResolutionManagement
         serviceRegistryMock.get(DomainObjectCollectionFactory) >> TestUtil.domainObjectCollectionFactory()
-        serviceRegistryMock.get(CrossProjectModelAccess) >> new DefaultCrossProjectModelAccess(projectRegistry, instantiatorMock)
+        serviceRegistryMock.get(CrossProjectModelAccess) >> new DefaultCrossProjectModelAccess(projectRegistry)
+        serviceRegistryMock.get(GradleLifecycleActionExecutor) >> gradleLifecycleActionExecutor
         serviceRegistryMock.get(ObjectFactory) >> objectFactory
         serviceRegistryMock.get(TaskDependencyFactory) >> DefaultTaskDependencyFactory.forProject(taskContainerMock, Mock(TaskDependencyUsageTracker))
         pluginManager.getPluginContainer() >> pluginContainer
@@ -297,8 +302,8 @@ class DefaultProjectTest extends Specification {
 
     def testProject() {
         expect:
-        project.is(child1.parent)
-        project.is(child1.rootProject)
+        project == child1.parent
+        project == child1.rootProject
         checkProject(project, null, 'root', rootDir)
     }
 
@@ -527,10 +532,10 @@ class DefaultProjectTest extends Specification {
     def getProject() {
         expect:
         project.project(Project.PATH_SEPARATOR).is(project)
-        assertLifecycleAwareProjectOf(project.project(Project.PATH_SEPARATOR + "child1"), child1)
-        assertLifecycleAwareProjectOf(project.project("child1"), child1)
-        assertLifecycleAwareProjectOf(child1.project("childchild"), childchild)
-        assertLifecycleAwareProjectOf(childchild.project(Project.PATH_SEPARATOR + "child1"), child1)
+        project.project(Project.PATH_SEPARATOR + "child1").is(child1)
+        project.project("child1").is(child1)
+        child1.project("childchild").is(childchild)
+        childchild.project(Project.PATH_SEPARATOR + "child1").is(child1)
     }
 
     def getProjectWithUnknownAbsolutePath() {
@@ -566,10 +571,10 @@ class DefaultProjectTest extends Specification {
     def findProject() {
         expect:
         project.findProject(Project.PATH_SEPARATOR).is(project)
-        assertLifecycleAwareProjectOf(project.findProject(Project.PATH_SEPARATOR + "child1"), child1)
-        assertLifecycleAwareProjectOf(project.findProject("child1"), child1)
-        assertLifecycleAwareProjectOf(child1.findProject('childchild'), childchild)
-        assertLifecycleAwareProjectOf(childchild.findProject(Project.PATH_SEPARATOR + "child1"), child1)
+        project.findProject(Project.PATH_SEPARATOR + "child1").is(child1)
+        project.findProject("child1").is(child1)
+        child1.findProject('childchild').is(childchild)
+        childchild.findProject(Project.PATH_SEPARATOR + "child1").is(child1)
     }
 
     def findProjectWithUnknownAbsolutePath() {
@@ -592,7 +597,7 @@ class DefaultProjectTest extends Specification {
         }
 
         then:
-        assertLifecycleAwareProjectOf(child, child1)
+        child.is(child1)
         child1.newProp == newPropValue
     }
 
@@ -607,7 +612,7 @@ class DefaultProjectTest extends Specification {
         then:
         1 * action.execute(child1)
         0 * action._
-        assertLifecycleAwareProjectOf(child, child1)
+        child.is(child1)
     }
 
     def methodMissing() {
@@ -949,6 +954,7 @@ def scriptMethod(Closure closure) {
         project.container(String, {}) instanceof FactoryNamedDomainObjectContainer
     }
 
+    @Ignore("Wrapping is currently disabled")
     def selfAccessWithoutLifecycleAwareWrapping() {
         expect:
         project.project(":child1").parent instanceof DefaultProject
@@ -967,6 +973,64 @@ def scriptMethod(Closure closure) {
                 assert project instanceof LifecycleAwareProject
             }
         }
+    }
+
+    @Ignore("Wrapping is currently disabled")
+    def referrerIsPreserved() {
+        expect:
+        assertLifecycleAwareWithReferrer(child1) { rootProject }
+        assertLifecycleAwareWithReferrer(child1) { parent }
+        assertLifecycleAwareWithReferrer(child1) { it.project.parent }
+        assertLifecycleAwareWithReferrer(project) { childProjects.values().first() }
+        assertLifecycleAwareWithReferrer(project) { getAllprojects()[1] }
+        assertLifecycleAwareWithReferrer(project) { getSubprojects()[0] }
+        assertLifecycleAwareWithReferrer(project) { findProject(":child1") }
+        assertLifecycleAwareWithReferrer(project) { project(":child1") }
+        assertLifecycleAwareWithReferrer(project) { project(":child1") {} }
+        assertLifecycleAwareWithReferrer(project) { project(":child1", Actions.doNothing()) }
+
+        def p = project
+        p.allprojects { if (it != p) { assertLifecycleAwareWithReferrer(it, p) } }
+        p.subprojects { assertLifecycleAwareWithReferrer(it, p) }
+    }
+
+    @Ignore("Wrapping is currently disabled")
+    def equalsContractForWrappers() {
+        when:
+        Project wrapped = LifecycleAwareProject.from(project, child1, gradleLifecycleActionExecutor, instantiatorMock)
+        Project overwrapped = LifecycleAwareProject.from(wrapped, child1, gradleLifecycleActionExecutor, instantiatorMock)
+        then:
+        project.equals(wrapped)
+        wrapped.equals(project)
+        project.equals(overwrapped)
+        overwrapped.equals(project)
+        wrapped.equals(overwrapped)
+        overwrapped.equals(wrapped)
+    }
+
+    @Ignore("Wrapping is currently disabled")
+    def mapUsageForWrappers() {
+        given:
+        Project wrapped = LifecycleAwareProject.from(project, child1, gradleLifecycleActionExecutor, instantiatorMock)
+        def map = [:]
+        when:
+        map[project] = "foo"
+        then:
+        map[wrapped] == "foo"
+        when:
+        map.clear()
+        map[wrapped] = "bar"
+        then:
+        map[project] == "bar"
+    }
+
+    static boolean assertLifecycleAwareWithReferrer(Project referrer, @DelegatesTo(Project.class) Closure navigate) {
+        navigate.delegate = referrer
+        assertLifecycleAwareWithReferrer(navigate(referrer), referrer)
+    }
+
+    static boolean assertLifecycleAwareWithReferrer(Project project, Project referrer) {
+        project instanceof LifecycleAwareProject && project.referrer == referrer
     }
 
     static boolean assertLifecycleAwareProjectOf(Project crosslyAccessed, Project of) {
