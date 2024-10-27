@@ -23,6 +23,7 @@ import org.gradle.initialization.ClassLoaderScopeRegistry
 import org.gradle.internal.build.BuildStateRegistry
 import org.gradle.internal.buildtree.BuildTreeWorkGraph
 import org.gradle.internal.cc.base.logger
+import org.gradle.internal.cc.base.serialize.IsolateOwners
 import org.gradle.internal.cc.base.serialize.ProjectProvider
 import org.gradle.internal.cc.base.serialize.service
 import org.gradle.internal.cc.base.serialize.withGradleIsolate
@@ -34,10 +35,13 @@ import org.gradle.internal.cc.impl.problems.ConfigurationCacheProblems
 import org.gradle.internal.cc.impl.serialize.Codecs
 import org.gradle.internal.cc.impl.serialize.DefaultClassDecoder
 import org.gradle.internal.cc.impl.serialize.DefaultClassEncoder
+import org.gradle.internal.cc.impl.serialize.DefaultSharedObjectDecoder
+import org.gradle.internal.cc.impl.serialize.DefaultSharedObjectEncoder
 import org.gradle.internal.cc.impl.serialize.ParallelStringDecoder
 import org.gradle.internal.cc.impl.serialize.ParallelStringEncoder
 import org.gradle.internal.encryption.EncryptionService
 import org.gradle.internal.hash.HashCode
+import org.gradle.internal.instantiation.InstantiatorFactory
 import org.gradle.internal.operations.BuildOperationProgressEventEmitter
 import org.gradle.internal.serialize.Decoder
 import org.gradle.internal.serialize.Encoder
@@ -49,11 +53,17 @@ import org.gradle.internal.serialize.graph.CloseableReadContext
 import org.gradle.internal.serialize.graph.CloseableWriteContext
 import org.gradle.internal.serialize.graph.DefaultReadContext
 import org.gradle.internal.serialize.graph.DefaultWriteContext
+import org.gradle.internal.serialize.graph.SharedObjectDecoder
+import org.gradle.internal.serialize.graph.SharedObjectEncoder
+import org.gradle.internal.serialize.graph.InlineSharedObjectDecoder
+import org.gradle.internal.serialize.graph.InlineSharedObjectEncoder
 import org.gradle.internal.serialize.graph.InlineStringDecoder
 import org.gradle.internal.serialize.graph.InlineStringEncoder
 import org.gradle.internal.serialize.graph.LoggingTracer
 import org.gradle.internal.serialize.graph.MutableReadContext
 import org.gradle.internal.serialize.graph.ReadContext
+import org.gradle.internal.serialize.graph.SpecialDecoders
+import org.gradle.internal.serialize.graph.SpecialEncoders
 import org.gradle.internal.serialize.graph.StringDecoder
 import org.gradle.internal.serialize.graph.StringEncoder
 import org.gradle.internal.serialize.graph.Tracer
@@ -92,7 +102,8 @@ class DefaultConfigurationCacheIO internal constructor(
     private val beanStateWriterLookup: BeanStateWriterLookup,
     private val eventEmitter: BuildOperationProgressEventEmitter,
     private val classLoaderScopeRegistryListener: ConfigurationCacheClassLoaderScopeRegistryListener,
-    private val classLoaderScopeRegistry: ClassLoaderScopeRegistry
+    private val classLoaderScopeRegistry: ClassLoaderScopeRegistry,
+    private val instantiatorFactory: InstantiatorFactory
 ) : ConfigurationCacheBuildTreeIO, ConfigurationCacheIncludedBuildIO {
 
     private
@@ -199,18 +210,22 @@ class DefaultConfigurationCacheIO internal constructor(
         }
     }
 
-    override fun WriteContext.writeIncludedBuildStateTo(stateFile: ConfigurationCacheStateFile, buildTreeState: StoredBuildTreeState) {
-        writeConfigurationCacheStateWithStringEncoder(currentStringEncoder, stateFile) { cacheState ->
-            cacheState.run {
-                writeBuildContent(host.currentBuild, buildTreeState)
+    override fun WriteContext.writeIncludedBuildStateTo(stateFile: ConfigurationCacheStateFile, buildTreeState: StoredBuildTreeState) =
+        // we share the string encoder with the root build, but not the shared object encoder
+        withSharedObjectEncoderFor(stateFile, currentStringEncoder) { sharedObjectEncoder ->
+            writeConfigurationCacheStateWithSpecialEncoders(SpecialEncoders(currentStringEncoder, sharedObjectEncoder), stateFile) { cacheState ->
+                cacheState.run {
+                    writeBuildContent(host.currentBuild, buildTreeState)
+                }
             }
         }
-    }
 
-    override fun ReadContext.readIncludedBuildStateFrom(stateFile: ConfigurationCacheStateFile, includedBuild: ConfigurationCacheBuild) =
-        readConfigurationCacheStateWithStringDecoder(currentStringDecoder, stateFile) { state ->
-            state.run {
-                readBuildContent(includedBuild)
+    override fun ReadContext.readIncludedBuildStateFrom(stateFile: ConfigurationCacheStateFile, includedBuild: ConfigurationCacheBuild): CachedBuildState =
+        withSharedObjectDecoderFor(stateFile, currentStringDecoder) { sharedObjectDecoder ->
+            readConfigurationCacheStateWithSpecialDecoders(SpecialDecoders(currentStringDecoder, sharedObjectDecoder), stateFile) { state ->
+                state.run {
+                    readBuildContent(includedBuild)
+                }
             }
         }
 
@@ -218,13 +233,9 @@ class DefaultConfigurationCacheIO internal constructor(
     fun <T> readConfigurationCacheState(
         stateFile: ConfigurationCacheStateFile,
         action: suspend MutableReadContext.(ConfigurationCacheState) -> T
-    ): T {
-        return if (isUsingParallelStringDeduplicationStrategy(stateFile)) {
-            withParallelStringDecoderFor(stateFile) { stringEncoder ->
-                readConfigurationCacheStateWithStringDecoder(stringEncoder, stateFile, action)
-            }
-        } else {
-            readConfigurationCacheStateWithStringDecoder(InlineStringDecoder, stateFile, action)
+    ): T = withStringDecoderFor(stateFile) { stringDecoder ->
+        withSharedObjectDecoderFor(stateFile, stringDecoder) { sharedObjectDecoder ->
+            readConfigurationCacheStateWithSpecialDecoders(SpecialDecoders(stringDecoder, sharedObjectDecoder), stateFile, action)
         }
     }
 
@@ -232,34 +243,75 @@ class DefaultConfigurationCacheIO internal constructor(
     fun <T> writeConfigurationCacheState(
         stateFile: ConfigurationCacheStateFile,
         action: suspend WriteContext.(ConfigurationCacheState) -> T
-    ): T {
-        return if (isUsingParallelStringDeduplicationStrategy(stateFile)) {
-            withParallelStringEncoderFor(stateFile) { stringEncoder ->
-                writeConfigurationCacheStateWithStringEncoder(stringEncoder, stateFile, action)
-            }
-        } else {
-            writeConfigurationCacheStateWithStringEncoder(InlineStringEncoder, stateFile, action)
-        }
-    }
-
-    private
-    fun <T> withParallelStringEncoderFor(stateFile: ConfigurationCacheStateFile, action: (StringEncoder) -> T): T =
-        stringsFileFor(stateFile).let { stringsFile ->
-            outputStreamFor(stringsFile.stateType, stringsFile::outputStream).use { stringStream ->
-                ParallelStringEncoder(stringStream).use { stringEncoder ->
-                    action(stringEncoder)
-                }
+    ): T =
+        withStringEncoderFor(stateFile) { stringEncoder ->
+            withSharedObjectEncoderFor(stateFile, stringEncoder) { sharedObjectEncoder ->
+                writeConfigurationCacheStateWithSpecialEncoders(SpecialEncoders(stringEncoder, sharedObjectEncoder), stateFile, action)
             }
         }
 
     private
-    fun <T> withParallelStringDecoderFor(stateFile: ConfigurationCacheStateFile, action: (StringDecoder) -> T): T =
-        stringsFileFor(stateFile).let { stringsFile ->
-            inputStreamFor(stringsFile.stateType, stringsFile::inputStream).use { stringStream ->
-                ParallelStringDecoder(stringStream).use { stringDecoder ->
-                    action(stringDecoder)
-                }
+    fun stringEncoderFor(stringsFile: ConfigurationCacheStateFile): StringEncoder =
+        if (isUsingParallelStringDeduplicationStrategy(stringsFile))
+            outputStreamFor(stringsFile.stateType, stringsFile::outputStream).let(::ParallelStringEncoder)
+        else
+            InlineStringEncoder
+
+    private
+    fun stringDecoderFor(stringsFile: ConfigurationCacheStateFile): StringDecoder =
+        if (isUsingParallelStringDeduplicationStrategy(stringsFile))
+            inputStreamFor(stringsFile.stateType, stringsFile::inputStream).let(::ParallelStringDecoder)
+        else
+            InlineStringDecoder
+
+    private
+    fun sharedObjectEncoderFor(baseFile: ConfigurationCacheStateFile, globalsFile: ConfigurationCacheStateFile, stringEncoder: StringEncoder): SharedObjectEncoder =
+        isUsingObjectSharingStrategy(baseFile).let { deduplicate ->
+            if (deduplicate) {
+                val (globalContext, _) = writeContextFor(globalsFile, SpecialEncoders(stringEncoder)) { "global values" }
+                globalContext.push(IsolateOwners.OwnerGradle(host.currentBuild.gradle))
+                DefaultSharedObjectEncoder(globalContext)
+            } else {
+                InlineSharedObjectEncoder
             }
+        }
+
+    private
+    fun sharedObjectDecoder(baseFile: ConfigurationCacheStateFile, globalsFile: ConfigurationCacheStateFile, stringDecoder: StringDecoder): SharedObjectDecoder =
+        isUsingObjectSharingStrategy(baseFile).let { deduplicate ->
+            if (deduplicate) {
+                // Create a context that honors global value duplication
+                // but uses an inline global value decoder
+                val (globalContext, _) = readContextFor(globalsFile, SpecialDecoders(stringDecoder))
+                globalContext.push(IsolateOwners.OwnerGradle(host.currentBuild.gradle))
+                DefaultSharedObjectDecoder(globalContext)
+            } else {
+                InlineSharedObjectDecoder
+            }
+        }
+
+    private
+    fun <T> withStringEncoderFor(stateFile: ConfigurationCacheStateFile, action: (StringEncoder) -> T): T =
+        stringsFileFor(stateFile).let { stringsFile ->
+            stringEncoderFor(stringsFile).use(action)
+        }
+
+    private
+    fun <T> withStringDecoderFor(stateFile: ConfigurationCacheStateFile, action: (StringDecoder) -> T): T =
+        stringsFileFor(stateFile).let { stringsFile ->
+            stringDecoderFor(stringsFile).use(action)
+        }
+
+    private
+    fun <T> withSharedObjectEncoderFor(baseFile: ConfigurationCacheStateFile, stringEncoder: StringEncoder, action: (SharedObjectEncoder) -> T): T =
+        sharedObjectFileFor(baseFile).let { globalsFile ->
+            sharedObjectEncoderFor(baseFile, globalsFile, stringEncoder).use(action)
+        }
+
+    private
+    fun <T> withSharedObjectDecoderFor(baseFile: ConfigurationCacheStateFile, stringDecoder: StringDecoder, action: (SharedObjectDecoder) -> T): T =
+        sharedObjectFileFor(baseFile).let { globalsFile ->
+            sharedObjectDecoder(baseFile, globalsFile, stringDecoder).use(action)
         }
 
     private
@@ -267,26 +319,30 @@ class DefaultConfigurationCacheIO internal constructor(
         stateFile.relatedStateFile(Path.path(".strings"))
 
     private
-    fun <T> readConfigurationCacheStateWithStringDecoder(
-        stringEncoder: StringDecoder,
+    fun sharedObjectFileFor(stateFile: ConfigurationCacheStateFile) =
+        stateFile.stateFileForSharedObjects()
+
+    private
+    fun <T> readConfigurationCacheStateWithSpecialDecoders(
+        specialDecoders: SpecialDecoders,
         stateFile: ConfigurationCacheStateFile,
         action: suspend MutableReadContext.(ConfigurationCacheState) -> T
-    ) = withReadContextFor(stateFile, stringEncoder) { codecs ->
+    ) = withReadContextFor(stateFile, specialDecoders) { codecs ->
         ConfigurationCacheState(codecs, stateFile, ChildContextSource(stateFile), eventEmitter, host).run {
             action(this)
         }
     }
 
     private
-    fun <T> writeConfigurationCacheStateWithStringEncoder(
-        stringEncoder: StringEncoder,
+    fun <T> writeConfigurationCacheStateWithSpecialEncoders(
+        specialEncoders: SpecialEncoders,
         stateFile: ConfigurationCacheStateFile,
         action: suspend WriteContext.(ConfigurationCacheState) -> T
     ): T {
         val profile = {
             host.currentBuild.gradle.owner.displayName.displayName + " state"
         }
-        return withWriteContextFor(stateFile, profile, stringEncoder) { codecs ->
+        return withWriteContextFor(stateFile, profile, specialEncoders) { codecs ->
             action(ConfigurationCacheState(codecs, stateFile, ChildContextSource(stateFile), eventEmitter, host))
         }
     }
@@ -310,25 +366,27 @@ class DefaultConfigurationCacheIO internal constructor(
     private
     fun writeContextFor(
         stateFile: ConfigurationCacheStateFile,
-        stringEncoder: StringEncoder,
+        specialEncoders: SpecialEncoders,
         profile: () -> String
-    ) = writeContextFor(stateFile.stateType, stateFile::outputStream, profile, stringEncoder)
+    ) = writeContextFor(stateFile.stateFile.name, stateFile.stateType, stateFile::outputStream, profile, specialEncoders)
 
     /**
      * @param profile the unique name associated with the output stream for debugging space usage issues
      */
     override fun writeContextFor(
+        name: String,
         stateType: StateType,
         outputStream: () -> OutputStream,
         profile: () -> String,
-        stringEncoder: StringEncoder,
+        specialEncoders: SpecialEncoders,
     ): Pair<CloseableWriteContext, Codecs> =
         encoderFor(stateType, outputStream).let { encoder ->
             writeContextFor(
+                name,
                 encoder,
                 loggingTracerFor(profile, encoder),
                 codecs,
-                stringEncoder
+                specialEncoders
             ) to codecs
         }
 
@@ -371,6 +429,14 @@ class DefaultConfigurationCacheIO internal constructor(
     fun isUsingSequentialStringDeduplicationStrategy(stateType: StateType) =
         stateType != StateType.Work && startParameter.isDeduplicatingStrings
 
+    /**
+     * For the [work graph state][StateType.Work], we use the parallel global value deduplication strategy since it spans multiple files,
+     * for everything else we use the sequential, per encoder/decoder, deduplication strategy.
+     */
+    private
+    fun isUsingObjectSharingStrategy(stateFile: ConfigurationCacheStateFile) =
+        stateFile.stateType == StateType.Work && startParameter.isSharingObjects
+
     private
     fun loggingTracerFor(profile: () -> String, encoder: PositionAwareEncoder) =
         loggingTracerLogLevel()?.let { level ->
@@ -392,18 +458,20 @@ class DefaultConfigurationCacheIO internal constructor(
     private
     fun writeContextFor(encoder: Encoder): Pair<CloseableWriteContext, Codecs> =
         writeContextFor(
+            "unnamed",
             encoder,
             null,
             codecs
         ) to codecs
 
     override fun <R> withReadContextFor(
+        name: String,
         stateType: StateType,
         inputStream: () -> InputStream,
-        stringDecoder: StringDecoder,
+        specialDecoders: SpecialDecoders,
         readOperation: suspend MutableReadContext.(Codecs) -> R
     ): R =
-        readContextFor(stateType, inputStream, stringDecoder)
+        readContextFor(name, stateType, inputStream, specialDecoders)
             .let { (context, codecs) ->
                 withReadContextFor(context, codecs, readOperation)
             }
@@ -416,46 +484,51 @@ class DefaultConfigurationCacheIO internal constructor(
         readContext.readWith(codecs, readOperation)
 
     override fun <R> withWriteContextFor(
+        name: String,
         stateType: StateType,
         outputStream: () -> OutputStream,
         profile: () -> String,
-        stringEncoder: StringEncoder,
+        specialEncoders: SpecialEncoders,
         writeOperation: suspend WriteContext.(Codecs) -> R
     ): R =
-        writeContextFor(stateType, outputStream, profile, stringEncoder)
+        writeContextFor(name,stateType, outputStream, profile, specialEncoders)
             .let { (context, codecs) ->
                 context.writeWith(codecs, writeOperation)
             }
 
     private fun readContextFor(
         stateFile: ConfigurationCacheStateFile,
-        stringDecoder: StringDecoder = InlineStringDecoder
-    ) = readContextFor(stateFile.stateType, stateFile::inputStream, stringDecoder)
+        specialDecoders: SpecialDecoders = SpecialDecoders()
+    ) = readContextFor(stateFile.stateFile.name, stateFile.stateType, stateFile::inputStream, specialDecoders)
 
     private fun readContextFor(
+        name: String,
         stateType: StateType,
         inputStream: () -> InputStream,
-        stringDecoder: StringDecoder
-    ) = readContextFor(decoderFor(stateType, inputStream), stringDecoder)
+        specialDecoders: SpecialDecoders
+    ) = readContextFor(name, decoderFor(stateType, inputStream), specialDecoders)
 
     override fun <T> runReadOperation(decoder: Decoder, readOperation: suspend ReadContext.(codecs: Codecs) -> T): T {
-        val (context, codecs) = readContextFor(decoder, InlineStringDecoder)
+        val (context, codecs) = readContextFor("unnamed", decoder, SpecialDecoders())
         return context.runReadOperation { readOperation(codecs) }
     }
 
     private
     fun readContextFor(
+        name: String? = null,
         decoder: Decoder,
-        stringDecoder: StringDecoder
-    ) = readContextFor(decoder, codecs, stringDecoder) to codecs
+        specialDecoders: SpecialDecoders
+    ) = readContextFor(name, decoder, codecs, specialDecoders) to codecs
 
     private
     fun writeContextFor(
+        name: String? = null,
         encoder: Encoder,
         tracer: Tracer?,
         codecs: Codecs,
-        stringEncoder: StringEncoder = InlineStringEncoder,
+        specialEncoders: SpecialEncoders = SpecialEncoders()
     ): CloseableWriteContext = DefaultWriteContext(
+        name,
         codecs.userTypesCodec(),
         encoder,
         beanStateWriterLookup,
@@ -463,22 +536,24 @@ class DefaultConfigurationCacheIO internal constructor(
         tracer,
         problems,
         classEncoder(),
-        stringEncoder = stringEncoder
+        specialEncoders = specialEncoders
     )
 
     private
     fun readContextFor(
+        name: String? = null,
         decoder: Decoder,
         codecs: Codecs,
-        stringDecoder: StringDecoder
+        specialDecoders: SpecialDecoders
     ): CloseableReadContext = DefaultReadContext(
+        name,
         codecs.userTypesCodec(),
         decoder,
         beanStateReaderLookup,
         logger,
         problems,
         classDecoder(),
-        stringDecoder,
+        specialDecoders
     )
 
     private
@@ -487,7 +562,10 @@ class DefaultConfigurationCacheIO internal constructor(
 
     private
     fun classDecoder() =
-        DefaultClassDecoder(classLoaderScopeRegistry.coreAndPluginsScope)
+        DefaultClassDecoder(
+            classLoaderScopeRegistry.coreAndPluginsScope,
+            instantiatorFactory.decorateScheme().deserializationInstantiator()
+        )
 
     /**
      * Provides R/W isolate contexts based on some other context.
@@ -495,7 +573,7 @@ class DefaultConfigurationCacheIO internal constructor(
     inner class ChildContextSource(private val baseFile: ConfigurationCacheStateFile) : IsolateContextSource {
         override fun readContextFor(baseContext: ReadContext, path: Path): CloseableReadContext =
             baseFile.relatedStateFile(path).let {
-                readContextFor(it, baseContext.currentStringDecoder).also { (subContext, subCodecs) ->
+                readContextFor(it, SpecialDecoders(baseContext.currentStringDecoder, baseContext.currentSharedObjectDecoder)).also { (subContext, subCodecs) ->
                     subContext.push(baseContext.isolate.owner, subCodecs.internalTypesCodec())
                     subContext.setSingletonProperty(baseContext.getSingletonProperty<ProjectProvider>())
                 }.first
@@ -503,7 +581,7 @@ class DefaultConfigurationCacheIO internal constructor(
 
         override fun writeContextFor(baseContext: WriteContext, path: Path): CloseableWriteContext =
             baseFile.relatedStateFile(path).let {
-                writeContextFor(it, baseContext.currentStringEncoder) { "child '$path' state" }.also { (subContext, subCodecs) ->
+                writeContextFor(it, SpecialEncoders(baseContext.currentStringEncoder, baseContext.currentSharedObjectEncoder)) { "child '$path' state" }.also { (subContext, subCodecs) ->
                     subContext.push(baseContext.isolate.owner, subCodecs.internalTypesCodec())
                 }.first
             }
@@ -521,6 +599,20 @@ class DefaultConfigurationCacheIO internal constructor(
         get() {
             require(this is DefaultReadContext)
             return this.stringDecoder
+        }
+
+    private
+    val WriteContext.currentSharedObjectEncoder: SharedObjectEncoder
+        get() {
+            require(this is DefaultWriteContext)
+            return this.sharedObjectEncoder
+        }
+
+    private
+    val ReadContext.currentSharedObjectDecoder: SharedObjectDecoder
+        get() {
+            require(this is DefaultReadContext)
+            return this.sharedObjectDecoder
         }
 
     private

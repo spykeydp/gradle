@@ -46,6 +46,8 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static javax.tools.Diagnostic.NOPOS;
+
 /**
  * A {@link DiagnosticListener} that consumes {@link Diagnostic} messages, and reports them as Gradle {@link Problems}.
  */
@@ -166,11 +168,15 @@ public class DiagnosticToProblemListener implements DiagnosticListener<JavaFileO
 
     @VisibleForTesting
     void buildProblem(Diagnostic<? extends JavaFileObject> diagnostic, ProblemSpec spec) {
-        spec.severity(mapKindToSeverity(diagnostic.getKind()));
+        Severity severity = mapKindToSeverity(diagnostic.getKind());
+        spec.severity(severity);
         addId(spec, diagnostic);
         addFormattedMessage(spec, diagnostic);
         addDetails(spec, diagnostic);
         addLocations(spec, diagnostic);
+        if (severity == Severity.ERROR) {
+            spec.solution(CompilationFailedException.RESOLUTION_MESSAGE);
+        }
     }
 
     private static void addId(ProblemSpec spec, Diagnostic<? extends JavaFileObject> diagnostic) {
@@ -205,14 +211,13 @@ public class DiagnosticToProblemListener implements DiagnosticListener<JavaFileO
 
         // We only set the location if we have a resource to point to
         if (resourceName != null) {
-            spec.fileLocation(resourceName);
             // If we know the line ...
-            if (0 < line) {
+            if (NOPOS != line) {
                 // ... and the column ...
-                if (0 < column) {
+                if (NOPOS != column) {
                     // ... and we know how long the error is (i.e. end - start)
                     // (documentation says that getEndPosition() will be NOPOS if and only if the getPosition() is NOPOS)
-                    if (0 < position) {
+                    if (NOPOS != position) {
                         // ... we can report the line, column, and extent ...
                         spec.lineInFileLocation(resourceName, line, column, end - position);
                     } else {
@@ -223,15 +228,17 @@ public class DiagnosticToProblemListener implements DiagnosticListener<JavaFileO
                     // ... otherwise we can still report the line
                     spec.lineInFileLocation(resourceName, line);
                 }
-            }
+            } else
+                // If we know the offsets ...
+                // (offset doesn't require line and column to be set, hence the separate check)
+                // (documentation says that getEndPosition() will be NOPOS iff getPosition() is NOPOS)
+                if (NOPOS != position && end > position) {
+                    // ... we can report the start and extent
+                    spec.offsetInFileLocation(resourceName, position, end - position);
+                } else {
+                    spec.fileLocation(resourceName);
+                }
 
-            // If we know the offsets ...
-            // (offset doesn't require line and column to be set, hence the separate check)
-            // (documentation says that getEndPosition() will be NOPOS iff getPosition() is NOPOS)
-            if (0 < position) {
-                // ... we can report the start and extent
-                spec.offsetInFileLocation(resourceName, position, end - position);
-            }
         }
     }
 
@@ -245,7 +252,7 @@ public class DiagnosticToProblemListener implements DiagnosticListener<JavaFileO
      */
     private static int clampLocation(long value) {
         if (value > Integer.MAX_VALUE) {
-            return Math.toIntExact(Diagnostic.NOPOS);
+            return Math.toIntExact(NOPOS);
         } else {
             return (int) value;
         }
