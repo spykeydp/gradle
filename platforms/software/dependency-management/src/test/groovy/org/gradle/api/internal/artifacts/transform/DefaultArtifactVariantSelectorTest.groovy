@@ -17,6 +17,7 @@
 package org.gradle.api.internal.artifacts.transform
 
 import com.google.common.collect.ImmutableList
+import org.gradle.api.artifacts.transform.TransformAction
 import org.gradle.api.internal.artifacts.DependencyManagementTestUtil
 import org.gradle.api.internal.artifacts.ivyservice.resolveengine.artifact.ArtifactVisitor
 import org.gradle.api.internal.artifacts.ivyservice.resolveengine.artifact.ResolvedArtifactSet
@@ -28,7 +29,6 @@ import org.gradle.api.internal.attributes.ImmutableAttributes
 import org.gradle.api.internal.attributes.immutable.ImmutableAttributesSchema
 import org.gradle.api.internal.attributes.matching.AttributeMatcher
 import org.gradle.internal.Describables
-import org.gradle.internal.component.model.AttributeMatchingExplanationBuilder
 import org.gradle.internal.component.resolution.failure.exception.ArtifactSelectionException
 import org.gradle.util.AttributeTestUtil
 import spock.lang.Specification
@@ -60,7 +60,7 @@ class DefaultArtifactVariantSelectorTest extends Specification {
         variant1.artifacts >> variant1Artifacts
         variant2.attributes >> typeAttributes("jar")
 
-        attributeMatcher.matchMultipleCandidates(_ as Collection, typeAttributes("classes"), _ as AttributeMatchingExplanationBuilder) >> [variant1]
+        attributeMatcher.matchMultipleCandidates(_ as Collection, typeAttributes("classes")) >> [variant1]
 
         expect:
         def result = newSelector().select(set, typeAttributes("classes"), false)
@@ -82,7 +82,7 @@ class DefaultArtifactVariantSelectorTest extends Specification {
         variant2.asDescribable() >> Describables.of('<variant2>')
         variant2.attributes >> typeAttributes("jar")
 
-        attributeMatcher.matchMultipleCandidates(_ as Collection, typeAttributes("classes"), _ as AttributeMatchingExplanationBuilder) >> [variant1, variant2]
+        attributeMatcher.matchMultipleCandidates(_ as Collection, typeAttributes("classes")) >> [variant1, variant2]
         attributeMatcher.isMatchingValue(_, _, _) >> true
 
         when:
@@ -113,9 +113,9 @@ class DefaultArtifactVariantSelectorTest extends Specification {
         variant2.attributes >> typeAttributes("classes")
         variant2.asDescribable() >> Describables.of('<variant2>')
 
-        attributeMatcher.matchMultipleCandidates(ImmutableList.copyOf(variants), _, _) >> []
-        attributeMatcher.matchMultipleCandidates(transformedVariants, _, _) >> transformedVariants
-        matchingCache.findTransformedVariants(_, _) >> transformedVariants
+        attributeMatcher.matchMultipleCandidates(ImmutableList.copyOf(variants), _) >> []
+        attributeMatcher.matchMultipleCandidates(transformedVariants, _) >> transformedVariants
+        matchingCache.findCandidateTransformationChains(_, _) >> transformedVariants
 
         def selector = newSelector()
 
@@ -125,17 +125,27 @@ class DefaultArtifactVariantSelectorTest extends Specification {
 
         then:
         def e = thrown(ArtifactSelectionException)
-        e.message == toPlatformLineSeparators("""Found multiple transforms that can produce a variant of <component> with requested attributes:
+        e.message == toPlatformLineSeparators("""Found multiple transformation chains that produce a variant of '<component>' with requested attributes:
   - artifactType 'dll'
-Found the following transforms:
-  - From '<variant1>':
-      - With source attributes: artifactType 'jar'
-      - Candidate transform(s):
-          - Transform '' producing attributes: artifactType 'dll'
-  - From '<variant2>':
-      - With source attributes: artifactType 'classes'
-      - Candidate transform(s):
-          - Transform '' producing attributes: artifactType 'dll'""")
+Found the following transformation chains:
+  - From <variant1>:
+      - With source attributes:
+          - artifactType 'jar'
+      - Candidate transformation chains:
+          - Transformation chain: '':
+              - '':
+                  - Converts from attributes
+                  - To attributes:
+                      - artifactType 'dll'
+  - From <variant2>:
+      - With source attributes:
+          - artifactType 'classes'
+      - Candidate transformation chains:
+          - Transformation chain: '':
+              - '':
+                  - Converts from attributes
+                  - To attributes:
+                      - artifactType 'dll'""")
     }
 
     def "returns no matching variant artifact set when no variants match and ignore no matching enabled"() {
@@ -150,9 +160,9 @@ Found the following transforms:
         variant1.attributes >> typeAttributes("jar")
         variant2.attributes >> typeAttributes("classes")
 
-        attributeMatcher.matchMultipleCandidates(_, _, _) >> []
+        attributeMatcher.matchMultipleCandidates(_, _) >> []
 
-        matchingCache.findTransformedVariants(_, _) >> []
+        matchingCache.findCandidateTransformationChains(_, _) >> []
 
         expect:
         def result = newSelector().select(set, typeAttributes("dll"), true)
@@ -174,9 +184,9 @@ Found the following transforms:
         variant2.attributes >> typeAttributes("classes")
         variant2.asDescribable() >> Describables.of('<variant2>')
 
-        attributeMatcher.matchMultipleCandidates(_, _, _) >> []
+        attributeMatcher.matchMultipleCandidates(_, _) >> []
 
-        matchingCache.findTransformedVariants(_, _) >> []
+        matchingCache.findCandidateTransformationChains(_, _) >> []
 
         when:
         def result = newSelector().select(set, typeAttributes("dll"), false)
@@ -231,6 +241,7 @@ Found the following transforms:
             getDisplayName() >> ""
             getFromAttributes() >> fromAttributes
             getToAttributes() >> toAttributes
+            getImplementationClass() >> TransformAction
         }
         TransformStep step = Mock(TransformStep) {
             getDisplayName() >> ""

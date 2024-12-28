@@ -16,6 +16,7 @@
 
 package org.gradle.api.internal.tasks.compile
 
+import org.gradle.api.problems.ProblemId
 import org.gradle.api.problems.internal.GradleCoreProblemGroup
 import org.gradle.api.problems.internal.InternalProblemSpec
 import spock.lang.Specification
@@ -29,10 +30,7 @@ class DiagnosticToProblemListenerTest extends Specification {
 
     private static final String DIAGNOSTIC_DETAIL = "Error detail line 1\nerror detail line 2"
 
-    def spec = Mock(InternalProblemSpec) {
-        // We report the formatted message in all cases
-        1 * additionalData(org.gradle.api.problems.internal.GeneralDataSpec, _)
-    }
+    def spec = Mock(InternalProblemSpec)
 
     def diagnosticToProblemListener = new DiagnosticToProblemListener(null, null)
 
@@ -47,7 +45,8 @@ class DiagnosticToProblemListenerTest extends Specification {
         diagnosticToProblemListener.buildProblem(diagnostic, spec)
 
         then:
-        1 * spec.id("dummy-code", "Java compilation error", GradleCoreProblemGroup.compilation().java())
+        1 * spec.id({ (it as ProblemId).group.equals(GradleCoreProblemGroup.compilation().java()) && (it as ProblemId).name == 'dummy-code' })
+        1 * spec.details(_)
     }
 
     def "file location is correctly reported"() {
@@ -70,6 +69,7 @@ class DiagnosticToProblemListenerTest extends Specification {
         0 * spec.lineInFileLocation(_, _, _)
         0 * spec.lineInFileLocation(_, _, _, _)
         0 * spec.offsetInFileLocation(_, _, _, _)
+        1 * spec.details(_)
     }
 
     def "file location, and line is correctly reported"() {
@@ -92,6 +92,7 @@ class DiagnosticToProblemListenerTest extends Specification {
         0 * spec.lineInFileLocation(_, _, _)
         0 * spec.lineInFileLocation(_, _, _, _)
         0 * spec.offsetInFileLocation(_, _, _, _)
+        1 * spec.details(_)
     }
 
 
@@ -118,6 +119,7 @@ class DiagnosticToProblemListenerTest extends Specification {
         1 * spec.lineInFileLocation("SomeFile.java", 1, 1)
         0 * spec.lineInFileLocation(_, _, _, _)
         0 * spec.offsetInFileLocation(_, _, _, _)
+        1 * spec.details(_)
     }
 
     def "when only start defined, no offset or slice location is reported"() {
@@ -144,6 +146,7 @@ class DiagnosticToProblemListenerTest extends Specification {
         1 * spec.lineInFileLocation("SomeFile.java", 1, 1)
         0 * spec.lineInFileLocation(_, _, _, _)
         0 * spec.offsetInFileLocation(_, _, _, _)
+        1 * spec.details(_)
     }
 
     def "when only the end is defined, no offset or slice location is reported"() {
@@ -170,6 +173,7 @@ class DiagnosticToProblemListenerTest extends Specification {
         1 * spec.lineInFileLocation("SomeFile.java", 1, 1)
         0 * spec.lineInFileLocation(_, _, _, _)
         0 * spec.offsetInFileLocation(_, _, _, _)
+        1 * spec.details(_)
     }
 
     def "when both start, position, and end are defined, an offset location is reported"() {
@@ -196,6 +200,7 @@ class DiagnosticToProblemListenerTest extends Specification {
         0 * spec.lineInFileLocation(_, _, _)
         1 * spec.lineInFileLocation("SomeFile.java", 1, 1, 10)
         0 * spec.offsetInFileLocation("SomeFile.java", 10, 10)
+        1 * spec.details(_)
     }
 
     def "multiline diagnostic messages are composed into contextual message and details"() {
@@ -208,7 +213,6 @@ class DiagnosticToProblemListenerTest extends Specification {
         then:
         // Only the first line of the message is used as the contextual message
         1 * spec.contextualLabel("Error detail line 1")
-        // The full message then repeated in the details
         1 * spec.details(DIAGNOSTIC_DETAIL)
     }
 

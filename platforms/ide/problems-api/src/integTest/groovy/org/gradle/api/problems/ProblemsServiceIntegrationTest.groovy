@@ -16,12 +16,11 @@
 
 package org.gradle.api.problems
 
-import org.gradle.api.problems.internal.LineInFileLocation
-import org.gradle.api.problems.internal.OffsetInFileLocation
+import org.gradle.api.problems.internal.TaskPathLocation
 import org.gradle.integtests.fixtures.AbstractIntegrationSpec
 import org.gradle.integtests.fixtures.GroovyBuildScriptLanguage
 
-import static org.gradle.api.problems.ReportingScript.getProblemReportingScript
+import static org.gradle.api.problems.fixtures.ReportingScript.getProblemReportingScript
 
 class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
 
@@ -36,7 +35,7 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "problem replaced with a validation warning if mandatory id is missing"() {
         given:
         withReportProblemTask """
-            problems.getReporter().reporting {
+            problems.getReporter().report {
                 it.details('Wrong API usage, will not show up anywhere')
             }
         """
@@ -48,12 +47,16 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
         verifyAll(receivedProblem) {
             definition.id.fqid == 'problems-api:missing-id'
             definition.id.displayName == 'Problem id must be specified'
-            locations.size() == 1
+            originLocations.size() == 1
+            contextualLocations.size() == 1
             with(oneLocation(LineInFileLocation)) {
                 length == -1
                 column == -1
                 line == 11
                 path == "build file '$buildFile.absolutePath'"
+            }
+            with(oneLocation(TaskPathLocation)) {
+                buildTreePath == ':reportProblem'
             }
         }
     }
@@ -61,8 +64,9 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "can emit a problem with minimal configuration"() {
         given:
         withReportProblemTask """
-            problems.getReporter().reporting {
-                it.id('type', 'label')
+            ${problemIdScript()}
+            problems.getReporter().report {
+                it.id(problemId)
             }
         """
 
@@ -76,8 +80,11 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
             with(oneLocation(LineInFileLocation)) {
                 length == -1
                 column == -1
-                line == 11
+                line == 13
                 path == "build file '$buildFile.absolutePath'"
+            }
+            with(oneLocation(TaskPathLocation)) {
+                buildTreePath == ':reportProblem'
             }
         }
     }
@@ -85,8 +92,9 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "can emit a problem with stack location"() {
         given:
         withReportProblemTask """
-            problems.getReporter().reporting {
-                it.id('type', 'label')
+            ${problemIdScript()}
+            problems.getReporter().report {
+                it.id(problemId)
                 .stackLocation()
             }
         """
@@ -102,7 +110,7 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
             with(oneLocation(LineInFileLocation)) {
                 length == -1
                 column == -1
-                line == 11
+                line == 13
                 path == "build file '$buildFile.absolutePath'"
             }
         }
@@ -112,8 +120,9 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "can emit a problem with documentation"() {
         given:
         withReportProblemTask """
-            problems.getReporter().reporting {
-                it.id('type', 'label')
+            ${problemIdScript()}
+            problems.getReporter().report {
+                it.id(problemId)
                 .documentedAt("https://example.org/doc")
             }
         """
@@ -128,8 +137,9 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "can emit a problem with offset location"() {
         given:
         withReportProblemTask """
-            problems.getReporter().reporting {
-                it.id('type', 'label')
+            ${problemIdScript()}
+            problems.getReporter().report {
+                it.id(problemId)
                 .offsetInFileLocation("test-location", 1, 2)
             }
         """
@@ -138,7 +148,7 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
         run('reportProblem')
 
         then:
-        verifyAll(receivedProblem.locations) {
+        verifyAll(receivedProblem.originLocations) {
             size() == 2
             with(get(0) as OffsetInFileLocation) {
                 path == 'test-location'
@@ -148,7 +158,7 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
             with(get(1) as LineInFileLocation) {
                 length == -1
                 column == -1
-                line == 11
+                line == 13
                 path == "build file '$buildFile.absolutePath'"
             }
         }
@@ -157,8 +167,9 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "can emit a problem with file and line number"() {
         given:
         withReportProblemTask """
-            problems.getReporter().reporting {
-                it.id('type', 'label')
+            ${problemIdScript()}
+            problems.getReporter().report {
+                it.id(problemId)
                 .lineInFileLocation("test-location", 1, 2)
             }
         """
@@ -167,7 +178,7 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
         run('reportProblem')
 
         then:
-        verifyAll(receivedProblem.locations) {
+        verifyAll(receivedProblem.originLocations) {
             size() == 2
             with(get(0) as LineInFileLocation) {
                 length == -1
@@ -178,7 +189,7 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
             with(get(1) as LineInFileLocation) {
                 length == -1
                 column == -1
-                line == 11
+                line == 13
                 path == "build file '$buildFile.absolutePath'"
             }
         }
@@ -187,8 +198,9 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "can emit a problem with a severity"(Severity severity) {
         given:
         withReportProblemTask """
-            problems.getReporter().reporting {
-                it.id('type', 'label')
+            ${problemIdScript()}
+            problems.getReporter().report {
+                it.id(problemId)
                 .severity(Severity.${severity.name()})
             }
         """
@@ -206,8 +218,9 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "can emit a problem with a solution"() {
         given:
         withReportProblemTask """
-            problems.getReporter().reporting {
-                it.id('type', 'label')
+            ${problemIdScript()}
+            problems.getReporter().report {
+                it.id(problemId)
                 .solution("solution")
             }
         """
@@ -222,8 +235,9 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "can emit a problem with exception cause"() {
         given:
         withReportProblemTask """
-            problems.getReporter().reporting {
-                it.id('type', 'label')
+            ${problemIdScript()}
+            problems.getReporter().report {
+                it.id(problemId)
                 .withException(new RuntimeException("test"))
             }
         """
@@ -241,8 +255,9 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "can emit a problem with additional data"() {
         given:
         withReportProblemTask """
-            problems.getReporter().reporting {
-                it.id('type', 'label')
+            ${problemIdScript()}
+            problems.getReporter().report {
+                it.id(problemId)
                 .additionalData(org.gradle.api.problems.internal.GeneralDataSpec) {
                     it.put('key','value')
                 }
@@ -256,11 +271,12 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
         receivedProblem.additionalData.asMap == ['key': 'value']
     }
 
-    def "cannot set addtional data with different type"() {
+    def "cannot set additional data with different type"() {
         given:
         withReportProblemTask """
-            problems.getReporter().reporting {
-                it.id('type', 'label')
+            ${problemIdScript()}
+            problems.getReporter().report {
+                it.id(problemId)
                 .additionalData(org.gradle.api.problems.internal.GeneralDataSpec) {
                     it.put('key','value')
                 }
@@ -279,10 +295,11 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
 
     def "cannot emit a problem with invalid additional data"() {
         given:
-        buildFile 'class InvalidData implements org.gradle.api.problems.internal.AdditionalData {}'
+        buildFile 'class InvalidData implements AdditionalData {}'
         withReportProblemTask """
-            problems.getReporter().reporting {
-                it.id('type', 'label')
+            ${problemIdScript()}
+            problems.getReporter().report {
+                it.id(problemId)
                 .additionalData(InvalidData) {}
             }
         """
@@ -297,7 +314,7 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
             with(oneLocation(LineInFileLocation)) {
                 length == -1
                 column == -1
-                line == 11
+                line == 13
                 path == "build file '$buildFile.absolutePath'"
             }
         }
@@ -306,9 +323,9 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "can throw a problem with a wrapper exception"() {
         given:
         withReportProblemTask """
-            problems.getReporter().throwing {
-                it.id('type', 'label')
-                .withException(new RuntimeException('test'))
+            ${problemIdScript()}
+            problems.getReporter().throwing(new RuntimeException('test')) {
+                it.id(problemId)
             }
         """
 
@@ -322,14 +339,14 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "can rethrow a caught exception"() {
         given:
         withReportProblemTask """
+            ${problemIdScript()}
             try {
-                problems.getReporter().throwing {
-                    it.id('type11', 'inner')
-                    .withException(new RuntimeException("test"))
+                problems.getReporter().throwing(new RuntimeException("test")) {
+                    it.id(${ProblemId.name}.create("type11", "inner", problemGroup))
                 }
             } catch (RuntimeException ex) {
-                problems.getReporter().throwing {
-                    it.id('type12', 'outer').withException(ex)
+                problems.getReporter().throwing(ex) {
+                    it.id(${ProblemId.name}.create("type12", "outer", problemGroup))
                 }
             }
         """
@@ -345,9 +362,10 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "problem progress events are not aggregated"() {
         given:
         withReportProblemTask """
+            ${problemIdScript()}
             for (int i = 0; i < 10; i++) {
-                problems.getReporter().reporting {
-                        it.id('type', 'label')
+                problems.getReporter().report {
+                        it.id(problemId)
                         .severity(Severity.WARNING)
                         .solution("solution")
                 }
@@ -375,9 +393,10 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "problem progress events in report"() {
         given:
         withReportProblemTask """
+            ${problemIdScript()}
             for (int i = 0; i < 10; i++) {
-                problems.getReporter().reporting {
-                        it.id("type\$i", "This is the heading problem text\$i")
+                problems.getReporter().report {
+                        it.id(${ProblemId.name}.create("type\$i", "This is the heading problem text\$i", problemGroup))
                         .severity(Severity.WARNING)
                         .details("This is a huge amount of extremely and very relevant details for this problem\$i")
                         .solution("solution")
@@ -409,9 +428,10 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
     def "problem report can be disabled"() {
         given:
         withReportProblemTask """
+            ${problemIdScript()}
             for (int i = 0; i < 10; i++) {
-                problems.getReporter().reporting {
-                        it.id("type\$i", "This is the heading problem text\$i")
+                problems.getReporter().report {
+                        it.id(${ProblemId.name}.create("type\$i", "This is the heading problem text\$i", problemGroup))
                         .severity(Severity.WARNING)
                         .details("This is a huge amount of extremely and very relevant details for this problem\$i")
                         .solution("solution")
@@ -436,5 +456,10 @@ class ProblemsServiceIntegrationTest extends AbstractIntegrationSpec {
                 solutions == ["solution"]
             }
         }
+    }
+
+    static String problemIdScript() {
+        """${ProblemGroup.name} problemGroup = ${ProblemGroup.name}.create("generic", "group label");
+           ${ProblemId.name} problemId = ${ProblemId.name}.create("type", "label", problemGroup)"""
     }
 }

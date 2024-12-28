@@ -16,10 +16,12 @@
 
 package org.gradle.problems.internal.rendering;
 
+import com.google.common.base.Strings;
 import org.gradle.api.NonNullApi;
+import org.gradle.api.problems.Problem;
 import org.gradle.api.problems.ProblemId;
-import org.gradle.api.problems.internal.GeneralData;
-import org.gradle.api.problems.internal.Problem;
+import org.gradle.api.problems.internal.GradleCoreProblemGroup;
+import org.gradle.util.internal.TextUtil;
 
 import java.io.PrintWriter;
 import java.io.Writer;
@@ -28,7 +30,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 @NonNullApi
 public class ProblemRenderer {
@@ -57,17 +58,18 @@ public class ProblemRenderer {
     }
 
     static void renderProblemGroup(PrintWriter output, ProblemId id, List<Problem> groupedProblems) {
-        groupedProblems.forEach(problem -> renderProblem(output, problem));
+        String sep = "";
+        for (Problem problem : groupedProblems) {
+            output.printf(sep);
+            renderProblem(output, problem);
+            sep = "%n";
+        }
     }
 
     static void renderProblem(PrintWriter output, Problem problem) {
-        Map<String, String> additionalData = Optional.ofNullable(problem.getAdditionalData())
-            .map(GeneralData.class::cast)
-            .map(GeneralData::getAsMap)
-            .orElse(Collections.emptyMap());
-
-        if (additionalData.containsKey("formatted")) {
-            formatMultiline(output, additionalData.get("formatted"), 0);
+        boolean isJavaCompilationProblem = problem.getDefinition().getId().getGroup().equals(GradleCoreProblemGroup.compilation().java());
+        if (isJavaCompilationProblem) {
+            formatMultiline(output, problem.getDetails(), 0);
         } else {
             if (problem.getContextualLabel() != null) {
                 formatMultiline(output, problem.getContextualLabel(), 1);
@@ -75,17 +77,19 @@ public class ProblemRenderer {
                 formatMultiline(output, problem.getDefinition().getId().getDisplayName(), 1);
             }
             if (problem.getDetails() != null) {
+                output.printf("%n");
                 formatMultiline(output, problem.getDetails(), 2);
             }
         }
     }
 
     static void formatMultiline(PrintWriter output, String message, int level) {
-        for (String line : message.split("\n")) {
-            for (int i = 0; i < level; i++) {
-                output.print("  ");
-            }
-            output.printf("%s%n", line);
+        if (message == null) {
+            return;
         }
+        @SuppressWarnings("InlineMeInliner")
+        String prefix = Strings.repeat(" ", level * 2);
+        String formatted = TextUtil.indent(message, prefix);
+        output.print(formatted);
     }
 }

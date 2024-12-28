@@ -24,7 +24,6 @@ import org.gradle.internal.build.BuildStateRegistry
 import org.gradle.internal.buildtree.BuildTreeWorkGraph
 import org.gradle.internal.cc.base.logger
 import org.gradle.internal.cc.base.serialize.IsolateOwners
-import org.gradle.internal.cc.base.serialize.ProjectProvider
 import org.gradle.internal.cc.base.serialize.service
 import org.gradle.internal.cc.base.serialize.withGradleIsolate
 import org.gradle.internal.cc.impl.cacheentry.EntryDetails
@@ -53,8 +52,6 @@ import org.gradle.internal.serialize.graph.CloseableReadContext
 import org.gradle.internal.serialize.graph.CloseableWriteContext
 import org.gradle.internal.serialize.graph.DefaultReadContext
 import org.gradle.internal.serialize.graph.DefaultWriteContext
-import org.gradle.internal.serialize.graph.SharedObjectDecoder
-import org.gradle.internal.serialize.graph.SharedObjectEncoder
 import org.gradle.internal.serialize.graph.InlineSharedObjectDecoder
 import org.gradle.internal.serialize.graph.InlineSharedObjectEncoder
 import org.gradle.internal.serialize.graph.InlineStringDecoder
@@ -62,22 +59,25 @@ import org.gradle.internal.serialize.graph.InlineStringEncoder
 import org.gradle.internal.serialize.graph.LoggingTracer
 import org.gradle.internal.serialize.graph.MutableReadContext
 import org.gradle.internal.serialize.graph.ReadContext
+import org.gradle.internal.serialize.graph.SharedObjectDecoder
+import org.gradle.internal.serialize.graph.SharedObjectEncoder
 import org.gradle.internal.serialize.graph.SpecialDecoders
 import org.gradle.internal.serialize.graph.SpecialEncoders
 import org.gradle.internal.serialize.graph.StringDecoder
 import org.gradle.internal.serialize.graph.StringEncoder
 import org.gradle.internal.serialize.graph.Tracer
 import org.gradle.internal.serialize.graph.WriteContext
-import org.gradle.internal.serialize.graph.getSingletonProperty
 import org.gradle.internal.serialize.graph.readCollection
 import org.gradle.internal.serialize.graph.readFile
 import org.gradle.internal.serialize.graph.readList
 import org.gradle.internal.serialize.graph.readNonNull
+import org.gradle.internal.serialize.graph.readStrings
 import org.gradle.internal.serialize.graph.readWith
 import org.gradle.internal.serialize.graph.runReadOperation
 import org.gradle.internal.serialize.graph.runWriteOperation
 import org.gradle.internal.serialize.graph.writeCollection
 import org.gradle.internal.serialize.graph.writeFile
+import org.gradle.internal.serialize.graph.writeStrings
 import org.gradle.internal.serialize.graph.writeWith
 import org.gradle.internal.serialize.kryo.KryoBackedDecoder
 import org.gradle.internal.serialize.kryo.KryoBackedEncoder
@@ -120,7 +120,7 @@ class DefaultConfigurationCacheIO internal constructor(
         stateFile: ConfigurationCacheStateFile
     ) {
         val rootDirs = collectRootDirs(buildStateRegistry)
-        writeConfigurationCacheState(stateFile) {
+        withWriteContextFor(stateFile, { "entry details" }) {
             writeCollection(rootDirs) { writeFile(it) }
             val addressSerializer = BlockAddressSerializer()
             writeCollection(intermediateModels.entries) { entry ->
@@ -137,18 +137,11 @@ class DefaultConfigurationCacheIO internal constructor(
         }
     }
 
-    private
-    fun WriteContext.writeModelKey(key: ModelKey) {
-        writeNullableString(key.identityPath?.path)
-        writeString(key.modelName)
-        writeNullableString(key.parameterHash?.toString())
-    }
-
     override fun readCacheEntryDetailsFrom(stateFile: ConfigurationCacheStateFile): EntryDetails? {
         if (!stateFile.exists) {
             return null
         }
-        return readConfigurationCacheState(stateFile) {
+        return withReadContextFor(stateFile) {
             val rootDirs = readList { readFile() }
             val addressSerializer = BlockAddressSerializer()
             val intermediateModels = mutableMapOf<ModelKey, BlockAddress>()
@@ -167,6 +160,29 @@ class DefaultConfigurationCacheIO internal constructor(
                 addressSerializer.read(this)
             }
             EntryDetails(rootDirs, intermediateModels, metadata, sideEffects)
+        }
+    }
+
+    private
+    fun WriteContext.writeModelKey(key: ModelKey) {
+        writeNullableString(key.identityPath?.path)
+        writeString(key.modelName)
+        writeNullableString(key.parameterHash?.toString())
+    }
+
+    override fun writeCandidateEntries(stateFile: ConfigurationCacheStateFile, entries: List<CandidateEntry>) {
+        withWriteContextFor(stateFile, { "candidates" }) {
+            writeStrings(entries.map { it.id })
+        }
+    }
+
+    override fun readCandidateEntries(stateFile: ConfigurationCacheStateFile): List<CandidateEntry> = when {
+        !stateFile.exists -> {
+            emptyList()
+        }
+
+        else -> withReadContextFor(stateFile) {
+            readStrings().map { CandidateEntry(it) }
         }
     }
 
@@ -491,7 +507,7 @@ class DefaultConfigurationCacheIO internal constructor(
         specialEncoders: SpecialEncoders,
         writeOperation: suspend WriteContext.(Codecs) -> R
     ): R =
-        writeContextFor(name,stateType, outputStream, profile, specialEncoders)
+        writeContextFor(name, stateType, outputStream, profile, specialEncoders)
             .let { (context, codecs) ->
                 context.writeWith(codecs, writeOperation)
             }
@@ -575,7 +591,6 @@ class DefaultConfigurationCacheIO internal constructor(
             baseFile.relatedStateFile(path).let {
                 readContextFor(it, SpecialDecoders(baseContext.currentStringDecoder, baseContext.currentSharedObjectDecoder)).also { (subContext, subCodecs) ->
                     subContext.push(baseContext.isolate.owner, subCodecs.internalTypesCodec())
-                    subContext.setSingletonProperty(baseContext.getSingletonProperty<ProjectProvider>())
                 }.first
             }
 
